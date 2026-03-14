@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { scoreProspect } from "../lib/scoring";
 import { generateEmail } from "../lib/emails";
 
-const API_BASE = "http://localhost:3001";
+const API_BASE = "";
 
 const VERTICALS = [
   {
