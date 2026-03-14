@@ -1,5 +1,4 @@
 import express from "express";
-import { load } from "cheerio";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -13,71 +12,67 @@ app.use((req, res, next) => {
   next();
 });
 
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const SEARXNG_INSTANCES = [
+  "https://search.sapti.me",
+  "https://searxng.ch",
+  "https://search.bus-hit.me",
+  "https://searx.tiekoetter.com",
+  "https://search.ononoki.org",
+];
 
-async function searchDuckDuckGo(query) {
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const res = await fetch(url, {
-    headers: { "User-Agent": USER_AGENT },
-  });
+async function searchSearXNG(query) {
+  const errors = [];
 
-  const ddgStatus = res.status;
-  const html = await res.text();
-  const htmlLength = html.length;
+  for (const instance of SEARXNG_INSTANCES) {
+    const url = `${instance}/search?q=${encodeURIComponent(query)}&format=json&categories=general&language=en`;
 
-  if (!res.ok) {
-    throw Object.assign(
-      new Error(`DuckDuckGo returned ${ddgStatus}`),
-      { debug: { ddgStatus, htmlLength, htmlPreview: html.slice(0, 500) } }
-    );
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "MoneyBadger-Prospecting/1.0",
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!res.ok) {
+        errors.push({ instance, status: res.status });
+        continue;
+      }
+
+      const data = await res.json();
+      const results = (data.results || []).map((r) => ({
+        title: r.title || "",
+        snippet: r.content || "",
+        url: r.url || "",
+      }));
+
+      return {
+        results,
+        debug: {
+          engine: "searxng",
+          instance,
+          resultCount: results.length,
+          rawResultCount: data.results?.length || 0,
+          failedInstances: errors,
+        },
+      };
+    } catch (e) {
+      errors.push({ instance, error: e.message });
+      continue;
+    }
   }
 
-  const $ = load(html);
-  const results = [];
-
-  const selectorsChecked = {
-    ".result": $(".result").length,
-    ".web-result": $(".web-result").length,
-    ".result__body": $(".result__body").length,
-    ".links_main": $(".links_main").length,
-    "a.result__a": $("a.result__a").length,
-  };
-
-  $(".result").each((_, el) => {
-    const title = $(el).find(".result__title a").text().trim();
-    const snippet = $(el).find(".result__snippet").text().trim();
-    const link = $(el).find(".result__title a").attr("href") || "";
-
-    let href = link;
-    const uddgMatch = link.match(/uddg=([^&]+)/);
-    if (uddgMatch) {
-      href = decodeURIComponent(uddgMatch[1]);
-    }
-
-    if (title && snippet) {
-      results.push({ title, snippet, url: href });
-    }
-  });
-
-  return {
-    results,
-    debug: {
-      ddgStatus,
-      htmlLength,
-      selectorsChecked,
-      htmlPreview: html.slice(0, 800),
-      resultCount: results.length,
-    },
-  };
+  throw Object.assign(
+    new Error(`All SearXNG instances failed`),
+    { debug: { engine: "searxng", failedInstances: errors } }
+  );
 }
 
-// Extract company-like entities from search results
 function extractCompanies(results, vertical, query) {
   const companies = [];
 
   for (const r of results) {
-    // Skip obvious non-company results (directories, articles, Wikipedia, etc.)
     const skipDomains = [
       "wikipedia.org",
       "linkedin.com",
@@ -90,7 +85,6 @@ function extractCompanies(results, vertical, query) {
     ];
     if (skipDomains.some((d) => r.url.includes(d))) continue;
 
-    // Skip generic directory/article pages
     const skipTerms = [
       "top 10",
       "best companies",
@@ -102,10 +96,7 @@ function extractCompanies(results, vertical, query) {
     const lowerTitle = r.title.toLowerCase();
     if (skipTerms.some((t) => lowerTitle.includes(t))) continue;
 
-    // Try to extract company name from title
-    // Usually: "Company Name - tagline" or "Company Name | tagline"
     let name = r.title.split(/[-|–—]/)[0].trim();
-    // Remove common suffixes
     name = name
       .replace(/\s*(Pty|Ltd|PTY|LTD|Inc|LLC|\(Pty\)|\(Ltd\))\.?\s*/gi, "")
       .trim();
@@ -114,7 +105,6 @@ function extractCompanies(results, vertical, query) {
 
     const text = `${r.title} ${r.snippet}`.toLowerCase();
 
-    // Score cross-border signals from the text
     const crossBorderKeywords = [
       "cross-border",
       "international",
@@ -139,7 +129,6 @@ function extractCompanies(results, vertical, query) {
       text.includes(k)
     );
 
-    // Score location signals
     const locationKeywords = [
       "south africa",
       "cape town",
@@ -152,7 +141,6 @@ function extractCompanies(results, vertical, query) {
     ];
     const locationHits = locationKeywords.filter((k) => text.includes(k));
 
-    // Determine location from text
     let location = "South Africa";
     if (text.includes("cape town") || text.includes("western cape"))
       location = "Cape Town, Western Cape";
@@ -164,7 +152,6 @@ function extractCompanies(results, vertical, query) {
       location = "Durban, KwaZulu-Natal";
     else if (text.includes("pretoria")) location = "Pretoria, Gauteng";
 
-    // Only include if there's some cross-border or location signal
     if (crossBorderHits.length === 0 && locationHits.length === 0) continue;
 
     companies.push({
@@ -172,13 +159,14 @@ function extractCompanies(results, vertical, query) {
       website: r.url,
       vertical,
       description: r.snippet.slice(0, 200),
-      cross_border_signals: crossBorderHits.length > 0
-        ? `Keywords found: ${crossBorderHits.join(", ")}`
-        : "Location match but no direct cross-border signals in snippet",
+      cross_border_signals:
+        crossBorderHits.length > 0
+          ? `Keywords found: ${crossBorderHits.join(", ")}`
+          : "Location match but no direct cross-border signals in snippet",
       cross_border_keyword_count: crossBorderHits.length,
       location_keyword_count: locationHits.length,
       location,
-      source: `DuckDuckGo search: "${query}"`,
+      source: `SearXNG: "${query}"`,
       estimated_volume:
         crossBorderHits.length >= 3
           ? "high"
@@ -196,7 +184,7 @@ app.get("/api/search", async (req, res) => {
   if (!query) return res.status(400).json({ error: "query required" });
 
   try {
-    const { results, debug } = await searchDuckDuckGo(query);
+    const { results, debug } = await searchSearXNG(query);
     const companies = extractCompanies(results, vertical || "unknown", query);
     res.json({ companies, rawResultCount: results.length, debug });
   } catch (e) {
