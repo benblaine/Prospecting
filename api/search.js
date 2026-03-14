@@ -1,187 +1,174 @@
-// SearXNG public instances — open-source meta-search, designed for programmatic access.
-// Multiple instances for fallback if one is down or rate-limited.
-const SEARXNG_INSTANCES = [
-  "https://search.sapti.me",
-  "https://searxng.ch",
-  "https://search.bus-hit.me",
-  "https://searx.tiekoetter.com",
-  "https://search.ononoki.org",
-];
+// Apollo.io API integration for company prospecting
+// Docs: https://docs.apollo.io
 
-async function searchSearXNG(query) {
-  const errors = [];
+const APOLLO_BASE = "https://api.apollo.io";
 
-  for (const instance of SEARXNG_INSTANCES) {
-    const url = `${instance}/search?q=${encodeURIComponent(query)}&format=json&categories=general&language=en`;
+// Map our verticals to Apollo industry/keyword filters
+const VERTICAL_FILTERS = {
+  "Tourism & Hospitality": {
+    keywords: ["tourism", "hospitality", "safari", "travel", "tour operator", "lodge", "destination management"],
+    industries: ["hospitality", "leisure, travel & tourism"],
+  },
+  "Import/Export & Trade": {
+    keywords: ["import", "export", "trade", "wholesale", "freight", "logistics", "customs"],
+    industries: ["import and export", "international trade and development", "wholesale"],
+  },
+  "Tech & SaaS": {
+    keywords: ["software", "saas", "technology", "fintech", "platform"],
+    industries: ["computer software", "information technology and services", "internet"],
+  },
+  "E-commerce": {
+    keywords: ["ecommerce", "e-commerce", "online retail", "dropshipping", "shopify"],
+    industries: ["retail", "e-learning"],
+  },
+  "Agriculture & Wine": {
+    keywords: ["wine", "agriculture", "farming", "fruit", "export", "vineyard"],
+    industries: ["food & beverages", "wine and spirits", "farming"],
+  },
+  "Education": {
+    keywords: ["education", "school", "university", "edtech", "language school"],
+    industries: ["education management", "e-learning", "higher education"],
+  },
+  "Professional Services": {
+    keywords: ["consulting", "law firm", "design agency", "accounting", "advisory"],
+    industries: ["management consulting", "legal services", "design"],
+  },
+  "NGOs & Development": {
+    keywords: ["ngo", "nonprofit", "development", "charity", "foundation", "donor"],
+    industries: ["nonprofit organization management", "civic & social organization", "philanthropy"],
+  },
+};
 
-    try {
-      const res = await fetch(url, {
-        headers: {
-          "Accept": "application/json",
-          "User-Agent": "MoneyBadger-Prospecting/1.0",
-        },
-        signal: AbortSignal.timeout(10000),
-      });
+async function searchApollo(apiKey, vertical, query, page = 1) {
+  const filters = VERTICAL_FILTERS[vertical] || { keywords: [], industries: [] };
 
-      if (!res.ok) {
-        errors.push({ instance, status: res.status });
-        continue;
-      }
+  // Use Apollo's organization search
+  const body = {
+    q_organization_keyword_tags: filters.keywords,
+    organization_locations: ["South Africa"],
+    organization_num_employees_ranges: ["1,10", "11,50", "51,200", "201,500", "501,1000", "1001,5000"],
+    page,
+    per_page: 25,
+  };
 
-      const data = await res.json();
-      const results = (data.results || []).map((r) => ({
-        title: r.title || "",
-        snippet: r.content || "",
-        url: r.url || "",
-      }));
+  const res = await fetch(`${APOLLO_BASE}/api/v1/mixed_companies/search`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+    },
+    body: JSON.stringify(body),
+  });
 
-      return {
-        results,
+  const status = res.status;
+  const rawText = await res.text();
+
+  if (!res.ok) {
+    throw Object.assign(
+      new Error(`Apollo API returned ${status}`),
+      {
         debug: {
-          engine: "searxng",
-          instance,
-          resultCount: results.length,
-          rawResultCount: data.results?.length || 0,
-          failedInstances: errors,
+          engine: "apollo",
+          status,
+          responsePreview: rawText.slice(0, 500),
+          requestBody: body,
         },
-      };
-    } catch (e) {
-      errors.push({ instance, error: e.message });
-      continue;
-    }
+      }
+    );
   }
 
-  throw Object.assign(
-    new Error(`All SearXNG instances failed`),
-    { debug: { engine: "searxng", failedInstances: errors } }
-  );
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    throw Object.assign(
+      new Error("Apollo returned invalid JSON"),
+      { debug: { engine: "apollo", status, responsePreview: rawText.slice(0, 1000) } }
+    );
+  }
+
+  const organizations = data.organizations || data.accounts || [];
+
+  const companies = organizations.map((org) => ({
+    name: org.name || "Unknown",
+    website: org.website_url || org.primary_domain || "",
+    vertical,
+    description: org.short_description || org.seo_description || "",
+    industry: org.industry || "",
+    employee_count: org.estimated_num_employees || null,
+    annual_revenue: org.annual_revenue_printed || null,
+    location: [org.city, org.state, org.country].filter(Boolean).join(", ") || "South Africa",
+    founded_year: org.founded_year || null,
+    linkedin_url: org.linkedin_url || "",
+    phone: org.phone || "",
+    keywords: org.keywords || [],
+    apollo_id: org.id || null,
+    source: "Apollo.io",
+    // We'll compute cross-border signals from the data
+    cross_border_signals: buildCrossBorderSignals(org),
+    estimated_volume: estimateVolume(org),
+  }));
+
+  return {
+    companies,
+    debug: {
+      engine: "apollo",
+      status,
+      totalResults: data.pagination?.total_entries || organizations.length,
+      page: data.pagination?.page || page,
+      totalPages: data.pagination?.total_pages || 1,
+      returnedCount: organizations.length,
+    },
+  };
 }
 
-function extractCompanies(results, vertical, query) {
-  const companies = [];
+function buildCrossBorderSignals(org) {
+  const signals = [];
+  const desc = (org.short_description || "").toLowerCase();
+  const keywords = (org.keywords || []).join(" ").toLowerCase();
+  const text = `${desc} ${keywords}`;
 
-  for (const r of results) {
-    const skipDomains = [
-      "wikipedia.org",
-      "linkedin.com",
-      "facebook.com",
-      "twitter.com",
-      "youtube.com",
-      "reddit.com",
-      "quora.com",
-      "gov.za",
-    ];
-    if (skipDomains.some((d) => r.url.includes(d))) continue;
+  if (text.match(/international|global|cross.border|overseas/)) signals.push("international operations mentioned");
+  if (text.match(/import|export|trade/)) signals.push("import/export activity");
+  if (text.match(/payment|forex|currency|fx/)) signals.push("payment/FX references");
+  if (text.match(/ship|freight|logistics|customs/)) signals.push("logistics/shipping");
 
-    const skipTerms = [
-      "top 10",
-      "best companies",
-      "list of",
-      "directory",
-      "how to",
-      "what is",
-    ];
-    const lowerTitle = r.title.toLowerCase();
-    if (skipTerms.some((t) => lowerTitle.includes(t))) continue;
+  const industry = (org.industry || "").toLowerCase();
+  if (industry.match(/international|import|export|trade/)) signals.push(`industry: ${org.industry}`);
 
-    let name = r.title.split(/[-|–—]/)[0].trim();
-    name = name
-      .replace(/\s*(Pty|Ltd|PTY|LTD|Inc|LLC|\(Pty\)|\(Ltd\))\.?\s*/gi, "")
-      .trim();
+  if ((org.estimated_num_employees || 0) > 50) signals.push(`${org.estimated_num_employees}+ employees`);
 
-    if (!name || name.length < 2 || name.length > 80) continue;
+  return signals.length > 0
+    ? signals.join("; ")
+    : "South African company in target vertical";
+}
 
-    const text = `${r.title} ${r.snippet}`.toLowerCase();
+function estimateVolume(org) {
+  const employees = org.estimated_num_employees || 0;
+  const revenue = org.annual_revenue || 0;
 
-    const crossBorderKeywords = [
-      "cross-border",
-      "international",
-      "import",
-      "export",
-      "global",
-      "foreign",
-      "overseas",
-      "forex",
-      "fx",
-      "swift",
-      "remittance",
-      "payment",
-      "transfer",
-      "trade",
-      "shipping",
-      "freight",
-      "customs",
-      "currency",
-    ];
-    const crossBorderHits = crossBorderKeywords.filter((k) =>
-      text.includes(k)
-    );
-
-    const locationKeywords = [
-      "south africa",
-      "cape town",
-      "johannesburg",
-      "durban",
-      "pretoria",
-      "stellenbosch",
-      "western cape",
-      "gauteng",
-    ];
-    const locationHits = locationKeywords.filter((k) => text.includes(k));
-
-    let location = "South Africa";
-    if (text.includes("cape town") || text.includes("western cape"))
-      location = "Cape Town, Western Cape";
-    else if (text.includes("johannesburg") || text.includes("gauteng"))
-      location = "Johannesburg, Gauteng";
-    else if (text.includes("stellenbosch"))
-      location = "Stellenbosch, Western Cape";
-    else if (text.includes("durban") || text.includes("kwazulu"))
-      location = "Durban, KwaZulu-Natal";
-    else if (text.includes("pretoria")) location = "Pretoria, Gauteng";
-
-    if (crossBorderHits.length === 0 && locationHits.length === 0) continue;
-
-    companies.push({
-      name,
-      website: r.url,
-      vertical,
-      description: r.snippet.slice(0, 200),
-      cross_border_signals:
-        crossBorderHits.length > 0
-          ? `Keywords found: ${crossBorderHits.join(", ")}`
-          : "Location match but no direct cross-border signals in snippet",
-      cross_border_keyword_count: crossBorderHits.length,
-      location_keyword_count: locationHits.length,
-      location,
-      source: `SearXNG: "${query}"`,
-      estimated_volume:
-        crossBorderHits.length >= 3
-          ? "high"
-          : crossBorderHits.length >= 1
-            ? "medium"
-            : "low",
-    });
-  }
-
-  return companies;
+  if (revenue > 10000000 || employees > 200) return "high";
+  if (revenue > 1000000 || employees > 20) return "medium";
+  return "low";
 }
 
 export default async function handler(req, res) {
-  const { query, vertical } = req.query;
-  if (!query) return res.status(400).json({ error: "query required" });
+  const { query, vertical, page } = req.query;
+  const apiKey = req.headers["x-apollo-key"];
+
+  if (!apiKey) return res.status(401).json({ error: "Apollo API key required (x-apollo-key header)" });
+  if (!vertical) return res.status(400).json({ error: "vertical parameter required" });
 
   try {
-    const { results, debug } = await searchSearXNG(query);
-    const companies = extractCompanies(results, vertical || "unknown", query);
+    const { companies, debug } = await searchApollo(apiKey, vertical, query, parseInt(page) || 1);
     res.json({
       companies,
-      rawResultCount: results.length,
+      rawResultCount: companies.length,
       debug,
     });
   } catch (e) {
     console.error("Search error:", e.message);
-    res.status(500).json({
+    res.status(e.debug?.status === 401 ? 401 : 500).json({
       error: e.message,
       debug: e.debug || null,
     });

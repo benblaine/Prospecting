@@ -1,5 +1,6 @@
 // Heuristic ICP scoring for MoneyBadger prospects
 // Scores 1-5 on each criterion, weighted to produce a total out of 45
+// Enhanced to use Apollo.io enriched data when available
 
 const CROSS_BORDER_STRONG = [
   "cross-border", "international payment", "forex", "swift",
@@ -47,7 +48,7 @@ function clamp(val, min, max) {
 }
 
 export function scoreProspect(company) {
-  const text = `${company.name} ${company.description} ${company.cross_border_signals}`.toLowerCase();
+  const text = `${company.name} ${company.description} ${company.cross_border_signals} ${(company.keywords || []).join(" ")} ${company.industry || ""}`.toLowerCase();
 
   // Cross-border volume (weight 3x)
   const cbStrong = countKeywordHits(text, CROSS_BORDER_STRONG);
@@ -58,21 +59,26 @@ export function scoreProspect(company) {
     1,
     5
   );
-  // Boost based on estimated_volume field from scraper
+  // Boost based on estimated_volume field
   if (company.estimated_volume === "high") crossBorderVolume = clamp(crossBorderVolume + 1, 1, 5);
+  // Boost based on employee count (Apollo data) — larger companies move more money
+  if (company.employee_count > 200) crossBorderVolume = clamp(crossBorderVolume + 1, 1, 5);
+  else if (company.employee_count > 50) crossBorderVolume = clamp(crossBorderVolume + 1, 1, 5);
 
   // Pain level (weight 2x)
   const painHits = countKeywordHits(text, PAIN_KEYWORDS);
-  // Companies in import/export and tourism tend to have more pain
   const highPainVerticals = ["Import/Export & Trade", "Tourism & Hospitality", "Agriculture & Wine"];
   const verticalPainBoost = highPainVerticals.includes(company.vertical) ? 1 : 0;
   const painLevel = clamp(2 + painHits + verticalPainBoost, 1, 5);
 
-  // Accessibility (weight 2x) — based on whether we have a real website and description
+  // Accessibility (weight 2x)
   let accessibility = 2;
   if (company.website && company.website.startsWith("http")) accessibility++;
-  if (company.description && company.description.length > 50) accessibility++;
-  if (company.location && company.location !== "South Africa") accessibility++; // more specific location = easier to find
+  if (company.description && company.description.length > 30) accessibility++;
+  if (company.location && company.location !== "South Africa") accessibility++;
+  // Apollo-specific: LinkedIn URL or phone means we can reach them
+  if (company.linkedin_url) accessibility = clamp(accessibility + 1, 1, 5);
+  if (company.phone) accessibility = clamp(accessibility + 1, 1, 5);
   accessibility = clamp(accessibility, 1, 5);
 
   // Crypto readiness (weight 1x)
@@ -99,6 +105,8 @@ export function scoreProspect(company) {
   // Generate reasoning
   const reasons = [];
   if (crossBorderVolume >= 4) reasons.push("strong cross-border signals");
+  if (company.employee_count > 100) reasons.push(`${company.employee_count} employees`);
+  if (company.annual_revenue) reasons.push(`revenue: ${company.annual_revenue}`);
   if (painLevel >= 4) reasons.push("likely high pain with current FX/banking");
   if (cryptoReadiness >= 3) reasons.push("crypto-aware");
   if (strategicFit >= 4) reasons.push("high-value vertical");

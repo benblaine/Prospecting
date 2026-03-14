@@ -5,124 +5,55 @@ import { generateEmail } from "../lib/emails";
 const API_BASE = "";
 
 const VERTICALS = [
-  {
-    id: "tourism",
-    name: "Tourism & Hospitality",
-    tier: 1,
-    queries: [
-      "South African inbound tourism operators accepting international payments",
-      "Namibia safari lodge companies cross-border payments",
-      "South Africa destination management companies importing services",
-      "Cape Town tour operators international bookings payments",
-    ],
-  },
-  {
-    id: "import_export",
-    name: "Import/Export & Trade",
-    tier: 1,
-    queries: [
-      "South African import companies China India trade",
-      "Cape Town furniture importers international suppliers",
-      "South African export companies agricultural products",
-      "Johannesburg wholesale importers cross-border payments",
-    ],
-  },
-  {
-    id: "tech_saas",
-    name: "Tech & SaaS",
-    tier: 1,
-    queries: [
-      "South African SaaS companies selling internationally",
-      "Cape Town tech startups global revenue cross-border",
-      "South African software companies paying remote developers",
-      "Johannesburg fintech companies international expansion",
-    ],
-  },
-  {
-    id: "ecommerce",
-    name: "E-commerce",
-    tier: 1,
-    queries: [
-      "South African ecommerce companies importing products Shopify",
-      "South African online retailers cross-border suppliers",
-      "Cape Town dropshipping companies international sourcing",
-    ],
-  },
-  {
-    id: "agriculture",
-    name: "Agriculture & Wine",
-    tier: 2,
-    queries: [
-      "South African wine exporters international markets",
-      "Stellenbosch wine estates export revenue",
-      "South African fruit exporters cross-border payments",
-      "Western Cape agricultural exporters",
-    ],
-  },
-  {
-    id: "education",
-    name: "Education",
-    tier: 2,
-    queries: [
-      "South African international schools foreign student fees",
-      "South African ed-tech companies global expansion",
-      "Cape Town language schools international students payments",
-    ],
-  },
-  {
-    id: "professional_services",
-    name: "Professional Services",
-    tier: 2,
-    queries: [
-      "South African consulting firms international clients cross-border",
-      "Cape Town law firms international billing",
-      "South African design agencies global clients payments",
-    ],
-  },
-  {
-    id: "ngo",
-    name: "NGOs & Development",
-    tier: 2,
-    queries: [
-      "South African NGOs receiving international donor funding",
-      "Cape Town development organisations cross-border transfers",
-      "South African nonprofits international grants payments",
-    ],
-  },
+  { id: "tourism", name: "Tourism & Hospitality", tier: 1 },
+  { id: "import_export", name: "Import/Export & Trade", tier: 1 },
+  { id: "tech_saas", name: "Tech & SaaS", tier: 1 },
+  { id: "ecommerce", name: "E-commerce", tier: 1 },
+  { id: "agriculture", name: "Agriculture & Wine", tier: 2 },
+  { id: "education", name: "Education", tier: 2 },
+  { id: "professional_services", name: "Professional Services", tier: 2 },
+  { id: "ngo", name: "NGOs & Development", tier: 2 },
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Diagnostic trace log — captures raw request/response details
+// Diagnostic trace log
 const diagnosticTraces = [];
 
 function addTrace(entry) {
   diagnosticTraces.push({ ...entry, timestamp: new Date().toISOString() });
 }
 
-async function searchCompanies(query, vertical, retries = 2) {
+async function searchApollo(apiKey, vertical, page = 1, retries = 1) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const traceEntry = {
       type: "api_call",
-      query,
       vertical,
+      page,
       attempt: attempt + 1,
-      url: `${API_BASE}/api/search?${new URLSearchParams({ query, vertical })}`,
+      url: `${API_BASE}/api/search`,
     };
 
     try {
-      const params = new URLSearchParams({ query, vertical });
+      const params = new URLSearchParams({ vertical, page: String(page) });
       const start = performance.now();
-      const res = await fetch(`${API_BASE}/api/search?${params}`);
+      const res = await fetch(`${API_BASE}/api/search?${params}`, {
+        headers: { "x-apollo-key": apiKey },
+      });
       const elapsed = Math.round(performance.now() - start);
 
       traceEntry.status = res.status;
       traceEntry.elapsed_ms = elapsed;
-      traceEntry.headers = Object.fromEntries(res.headers.entries());
 
       const rawText = await res.text();
       traceEntry.response_length = rawText.length;
       traceEntry.response_preview = rawText.slice(0, 1000);
+
+      if (res.status === 401) {
+        traceEntry.error = "Invalid Apollo API key";
+        addTrace(traceEntry);
+        throw new Error("Invalid Apollo API key. Check your key at app.apollo.io/settings/integrations/api.");
+      }
 
       if (!res.ok) {
         traceEntry.error = `HTTP ${res.status}`;
@@ -131,7 +62,7 @@ async function searchCompanies(query, vertical, retries = 2) {
           await sleep(2000 * (attempt + 1));
           continue;
         }
-        throw new Error(`Search API ${res.status}: ${rawText.slice(0, 200)}`);
+        throw new Error(`Apollo API ${res.status}: ${rawText.slice(0, 200)}`);
       }
 
       let data;
@@ -139,7 +70,6 @@ async function searchCompanies(query, vertical, retries = 2) {
         data = JSON.parse(rawText);
       } catch (parseErr) {
         traceEntry.error = `JSON parse failed: ${parseErr.message}`;
-        traceEntry.response_preview = rawText.slice(0, 2000);
         addTrace(traceEntry);
         throw new Error(`Invalid JSON from API: ${rawText.slice(0, 200)}`);
       }
@@ -166,24 +96,11 @@ async function searchCompanies(query, vertical, retries = 2) {
 
 function toCSV(prospects) {
   const headers = [
-    "Tier",
-    "Score",
-    "Company",
-    "Vertical",
-    "Location",
-    "Website",
-    "Description",
-    "Cross-Border Signals",
-    "Est. Volume",
-    "CB Volume Score",
-    "Pain Level",
-    "Accessibility",
-    "Crypto Readiness",
-    "Strategic Fit",
-    "Reasoning",
-    "Email Subject",
-    "Email Body",
-    "Email CTA",
+    "Tier", "Score", "Company", "Vertical", "Industry", "Location",
+    "Website", "Employees", "Revenue", "Description", "Cross-Border Signals",
+    "Est. Volume", "LinkedIn", "CB Volume Score", "Pain Level",
+    "Accessibility", "Crypto Readiness", "Strategic Fit", "Reasoning",
+    "Email Subject", "Email Body", "Email CTA",
   ];
 
   const escape = (v) => {
@@ -199,11 +116,15 @@ function toCSV(prospects) {
       p.score?.weighted_total || "?",
       p.company.name,
       p.company.vertical,
+      p.company.industry || "",
       p.company.location,
       p.company.website,
+      p.company.employee_count || "",
+      p.company.annual_revenue || "",
       p.company.description,
       p.company.cross_border_signals,
       p.company.estimated_volume,
+      p.company.linkedin_url || "",
       p.score?.scores?.cross_border_volume || "",
       p.score?.scores?.pain_level || "",
       p.score?.scores?.accessibility || "",
@@ -255,13 +176,12 @@ function generateDiagnosticReport(logs, prospects) {
       const lines = [
         `\n[Trace ${i + 1}] ${t.timestamp}`,
         `  URL: ${t.url}`,
-        `  Query: "${t.query}" | Vertical: ${t.vertical}`,
+        `  Vertical: ${t.vertical} | Page: ${t.page}`,
         `  Attempt: ${t.attempt}`,
         `  Status: ${t.status}`,
         `  Elapsed: ${t.elapsed_ms || "?"}ms`,
         `  Response length: ${t.response_length || "?"} bytes`,
         `  Companies found: ${t.companies_found ?? "n/a"}`,
-        `  Raw results from DDG: ${t.raw_result_count ?? "n/a"}`,
       ];
       if (t.error) lines.push(`  ERROR: ${t.error}`);
       if (t.debug) lines.push(`  DEBUG: ${JSON.stringify(t.debug)}`);
@@ -279,6 +199,8 @@ function generateDiagnosticReport(logs, prospects) {
 }
 
 export default function ProspectingEngine() {
+  const [apolloKey, setApolloKey] = useState(() => localStorage.getItem("apollo_api_key") || "");
+  const [keySet, setKeySet] = useState(() => !!localStorage.getItem("apollo_api_key"));
   const [status, setStatus] = useState("idle");
   const [selectedVerticals, setSelectedVerticals] = useState(
     VERTICALS.map((v) => v.id)
@@ -300,6 +222,13 @@ export default function ProspectingEngine() {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
+  const handleKeySubmit = () => {
+    if (apolloKey.trim()) {
+      localStorage.setItem("apollo_api_key", apolloKey.trim());
+      setKeySet(true);
+    }
+  };
+
   const toggleVertical = (id) => {
     setSelectedVerticals((prev) =>
       prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]
@@ -311,55 +240,58 @@ export default function ProspectingEngine() {
     setStatus("running");
     setProspects([]);
     setLogs([]);
+    diagnosticTraces.length = 0;
 
     const verts = VERTICALS.filter((v) => selectedVerticals.includes(v.id));
-    const totalQueries = verts.reduce((s, v) => s + v.queries.length, 0);
-    let queryIdx = 0;
+    const key = localStorage.getItem("apollo_api_key");
 
-    // Phase 1 — Search via DuckDuckGo scraping
+    // Phase 1 — Search Apollo per vertical
     log("Starting prospecting engine...", "phase");
-    log(`Searching ${verts.length} verticals, ${totalQueries} queries via DuckDuckGo`, "info");
-    setProgress({ current: 0, total: totalQueries, phase: "Searching verticals" });
+    log(`Searching ${verts.length} verticals via Apollo.io`, "info");
+    setProgress({ current: 0, total: verts.length, phase: "Searching Apollo.io" });
 
     const allCompanies = [];
     const seenNames = new Set();
 
-    for (const vertical of verts) {
+    for (let vi = 0; vi < verts.length; vi++) {
       if (abortRef.current) break;
+      const vertical = verts[vi];
+      setProgress({
+        current: vi + 1,
+        total: verts.length,
+        phase: `Searching: ${vertical.name}`,
+      });
       log(`Vertical: ${vertical.name} (Tier ${vertical.tier})`, "phase");
 
-      for (const query of vertical.queries) {
-        if (abortRef.current) break;
-        queryIdx++;
-        setProgress({
-          current: queryIdx,
-          total: totalQueries,
-          phase: `Searching: ${vertical.name}`,
-        });
-        log(`Query ${queryIdx}/${totalQueries}: "${query}"`, "search");
-
-        try {
-          const result = await searchCompanies(query, vertical.name);
-          if (result?.companies?.length > 0) {
-            const newOnes = result.companies.filter(
-              (c) => !seenNames.has(c.name.toLowerCase())
-            );
-            newOnes.forEach((c) => seenNames.add(c.name.toLowerCase()));
-            allCompanies.push(...newOnes);
-            log(
-              `Found ${newOnes.length} new companies (${result.companies.length - newOnes.length} dupes skipped) [${result.rawResultCount} raw results]`,
-              "success"
-            );
-          } else {
-            log(`No companies extracted (${result?.rawResultCount || 0} raw results)`, "warn");
+      try {
+        const result = await searchApollo(key, vertical.name);
+        if (result?.companies?.length > 0) {
+          const newOnes = result.companies.filter(
+            (c) => !seenNames.has(c.name.toLowerCase())
+          );
+          newOnes.forEach((c) => seenNames.add(c.name.toLowerCase()));
+          allCompanies.push(...newOnes);
+          log(
+            `Found ${newOnes.length} companies (${result.companies.length - newOnes.length} dupes skipped)`,
+            "success"
+          );
+          if (result.debug?.totalResults) {
+            log(`Apollo shows ${result.debug.totalResults} total matches for this vertical`, "info");
           }
-        } catch (e) {
-          log(`Error: ${e.message}`, "error");
+        } else {
+          log(`No companies found for ${vertical.name}`, "warn");
         }
-
-        // Rate-limit DuckDuckGo requests
-        await sleep(2000);
+      } catch (e) {
+        log(`Error: ${e.message}`, "error");
+        if (e.message.includes("Invalid Apollo API key")) {
+          log("Check your API key at app.apollo.io → Settings → Integrations → API", "warn");
+          setStatus("stopped");
+          return;
+        }
       }
+
+      // Rate-limit Apollo requests
+      await sleep(1000);
     }
 
     log(`\nTotal unique companies found: ${allCompanies.length}`, "phase");
@@ -369,7 +301,7 @@ export default function ProspectingEngine() {
       setStatus("stopped");
       return;
     }
-    log("\nScoring prospects against ICP (heuristic)...", "phase");
+    log("\nScoring prospects against ICP...", "phase");
     setProgress({ current: 0, total: allCompanies.length, phase: "Scoring prospects" });
 
     const scored = [];
@@ -445,6 +377,24 @@ export default function ProspectingEngine() {
     URL.revokeObjectURL(url);
   };
 
+  const copyDiagnostic = async () => {
+    const report = generateDiagnosticReport(logs, prospects);
+    try {
+      await navigator.clipboard.writeText(report);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = report;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    setDiagnosticCopied(true);
+    setTimeout(() => setDiagnosticCopied(false), 3000);
+  };
+
   const tierCounts = {
     A: prospects.filter((p) => p.score?.tier === "A").length,
     B: prospects.filter((p) => p.score?.tier === "B").length,
@@ -489,16 +439,16 @@ export default function ProspectingEngine() {
           Engine
         </div>
         <div style={{ color: "#8898AA", fontSize: 13, marginTop: 4 }}>
-          Cross-border & treasury services pipeline builder — web scraping +
+          Cross-border & treasury services pipeline builder — Apollo.io +
           heuristic scoring
         </div>
       </div>
 
       {/* Main */}
       <div style={{ padding: "20px 24px", maxWidth: 800, margin: "0 auto" }}>
-        {/* Vertical selector */}
-        {status === "idle" && (
-          <div>
+        {/* Apollo API Key input */}
+        {!keySet && (
+          <div style={{ marginBottom: 24 }}>
             <div
               style={{
                 fontSize: 13,
@@ -509,7 +459,95 @@ export default function ProspectingEngine() {
                 marginBottom: 12,
               }}
             >
-              Select verticals to prospect
+              Apollo.io API Key
+            </div>
+            <div style={{ color: "#8898AA", fontSize: 12, marginBottom: 12, lineHeight: 1.5 }}>
+              Get your free API key at{" "}
+              <span style={{ color: "#F5A623" }}>app.apollo.io → Settings → Integrations → API</span>.
+              Free plan includes API access for company search.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                type="password"
+                value={apolloKey}
+                onChange={(e) => setApolloKey(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleKeySubmit()}
+                placeholder="Your Apollo API key..."
+                style={{
+                  flex: 1,
+                  padding: "12px 16px",
+                  borderRadius: 8,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.04)",
+                  color: "#FFFFFF",
+                  fontSize: 14,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  outline: "none",
+                }}
+              />
+              <button
+                onClick={handleKeySubmit}
+                disabled={!apolloKey.trim()}
+                style={{
+                  padding: "12px 24px",
+                  borderRadius: 8,
+                  border: "none",
+                  background: apolloKey.trim() ? "#F5A623" : "#425466",
+                  color: "#0A2540",
+                  fontSize: 14,
+                  fontWeight: 700,
+                  cursor: apolloKey.trim() ? "pointer" : "not-allowed",
+                }}
+              >
+                Save
+              </button>
+            </div>
+            <div style={{ color: "#425466", fontSize: 11, marginTop: 6 }}>
+              Stored locally in your browser only.
+            </div>
+          </div>
+        )}
+
+        {/* Vertical selector */}
+        {keySet && status === "idle" && (
+          <div>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: 12,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: "#8898AA",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                }}
+              >
+                Select verticals to prospect
+              </div>
+              <button
+                onClick={() => {
+                  localStorage.removeItem("apollo_api_key");
+                  setApolloKey("");
+                  setKeySet(false);
+                }}
+                style={{
+                  padding: "4px 12px",
+                  borderRadius: 9999,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "transparent",
+                  color: "#8898AA",
+                  fontSize: 11,
+                  cursor: "pointer",
+                }}
+              >
+                Change API Key
+              </button>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {VERTICALS.map((v) => {
@@ -554,12 +592,7 @@ export default function ProspectingEngine() {
                 width: "100%",
               }}
             >
-              Start Prospecting ({selectedVerticals.length} verticals,{" "}
-              {VERTICALS.filter((v) => selectedVerticals.includes(v.id)).reduce(
-                (s, v) => s + v.queries.length,
-                0
-              )}{" "}
-              searches)
+              Start Prospecting ({selectedVerticals.length} verticals)
             </button>
             <div
               style={{
@@ -569,8 +602,7 @@ export default function ProspectingEngine() {
                 textAlign: "center",
               }}
             >
-              Takes ~2-5 min depending on verticals selected. Requires the
-              backend server running on port 3001.
+              Searches Apollo.io for SA companies in each vertical, scores against ICP, drafts outreach.
             </div>
           </div>
         )}
@@ -633,13 +665,7 @@ export default function ProspectingEngine() {
         {/* Results summary */}
         {prospects.length > 0 && (
           <div style={{ marginBottom: 20 }}>
-            <div
-              style={{
-                display: "flex",
-                gap: 12,
-                marginBottom: 16,
-              }}
-            >
+            <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
               {["A", "B", "C"].map((tier) => (
                 <div
                   key={tier}
@@ -714,13 +740,7 @@ export default function ProspectingEngine() {
                       transition: "all 150ms",
                     }}
                   >
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 10,
-                      }}
-                    >
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <span
                         style={{
                           display: "inline-block",
@@ -735,25 +755,16 @@ export default function ProspectingEngine() {
                       >
                         {p.score?.tier || "?"}
                       </span>
-                      <span
-                        style={{ fontSize: 14, fontWeight: 600, flex: 1 }}
-                      >
+                      <span style={{ fontSize: 14, fontWeight: 600, flex: 1 }}>
                         {p.company.name}
                       </span>
-                      <span
-                        style={{ fontSize: 12, color: "#8898AA", flexShrink: 0 }}
-                      >
+                      <span style={{ fontSize: 12, color: "#8898AA", flexShrink: 0 }}>
                         {p.score?.weighted_total || 0}/45
                       </span>
                     </div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: "#8898AA",
-                        marginTop: 4,
-                      }}
-                    >
+                    <div style={{ fontSize: 12, color: "#8898AA", marginTop: 4 }}>
                       {p.company.vertical} · {p.company.location}
+                      {p.company.employee_count ? ` · ${p.company.employee_count} employees` : ""}
                     </div>
 
                     {expanded && (
@@ -774,6 +785,21 @@ export default function ProspectingEngine() {
                         {p.company.website && (
                           <p style={{ color: "#8898AA", margin: "0 0 4px", fontSize: 12 }}>
                             {p.company.website}
+                          </p>
+                        )}
+                        {p.company.industry && (
+                          <p style={{ color: "#8898AA", margin: "0 0 4px", fontSize: 12 }}>
+                            Industry: {p.company.industry}
+                          </p>
+                        )}
+                        {p.company.annual_revenue && (
+                          <p style={{ color: "#8898AA", margin: "0 0 4px", fontSize: 12 }}>
+                            Revenue: {p.company.annual_revenue}
+                          </p>
+                        )}
+                        {p.company.linkedin_url && (
+                          <p style={{ color: "#8898AA", margin: "0 0 4px", fontSize: 12 }}>
+                            LinkedIn: {p.company.linkedin_url}
                           </p>
                         )}
                         <p style={{ color: "#8898AA", margin: "4px 0 0", fontSize: 11 }}>
@@ -802,13 +828,7 @@ export default function ProspectingEngine() {
                             >
                               Draft outreach email
                             </div>
-                            <div
-                              style={{
-                                fontWeight: 600,
-                                fontSize: 13,
-                                marginBottom: 6,
-                              }}
-                            >
+                            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
                               {p.email.subject}
                             </div>
                             <div
@@ -886,26 +906,7 @@ export default function ProspectingEngine() {
         {/* Diagnostic report */}
         {logs.length > 0 && (
           <button
-            onClick={async () => {
-              const report = generateDiagnosticReport(logs, prospects);
-              try {
-                await navigator.clipboard.writeText(report);
-                setDiagnosticCopied(true);
-                setTimeout(() => setDiagnosticCopied(false), 3000);
-              } catch {
-                // Fallback for browsers that block clipboard
-                const ta = document.createElement("textarea");
-                ta.value = report;
-                ta.style.position = "fixed";
-                ta.style.opacity = "0";
-                document.body.appendChild(ta);
-                ta.select();
-                document.execCommand("copy");
-                document.body.removeChild(ta);
-                setDiagnosticCopied(true);
-                setTimeout(() => setDiagnosticCopied(false), 3000);
-              }
-            }}
+            onClick={copyDiagnostic}
             style={{
               marginTop: 8,
               padding: "10px 24px",
