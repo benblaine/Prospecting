@@ -93,23 +93,68 @@ const VERTICALS = [
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Diagnostic trace log — captures raw request/response details
+const diagnosticTraces = [];
+
+function addTrace(entry) {
+  diagnosticTraces.push({ ...entry, timestamp: new Date().toISOString() });
+}
+
 async function searchCompanies(query, vertical, retries = 2) {
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const traceEntry = {
+      type: "api_call",
+      query,
+      vertical,
+      attempt: attempt + 1,
+      url: `${API_BASE}/api/search?${new URLSearchParams({ query, vertical })}`,
+    };
+
     try {
       const params = new URLSearchParams({ query, vertical });
+      const start = performance.now();
       const res = await fetch(`${API_BASE}/api/search?${params}`);
+      const elapsed = Math.round(performance.now() - start);
+
+      traceEntry.status = res.status;
+      traceEntry.elapsed_ms = elapsed;
+      traceEntry.headers = Object.fromEntries(res.headers.entries());
+
+      const rawText = await res.text();
+      traceEntry.response_length = rawText.length;
+      traceEntry.response_preview = rawText.slice(0, 1000);
 
       if (!res.ok) {
-        const err = await res.text();
+        traceEntry.error = `HTTP ${res.status}`;
+        addTrace(traceEntry);
         if (attempt < retries) {
           await sleep(2000 * (attempt + 1));
           continue;
         }
-        throw new Error(`Search API ${res.status}: ${err}`);
+        throw new Error(`Search API ${res.status}: ${rawText.slice(0, 200)}`);
       }
 
-      return await res.json();
+      let data;
+      try {
+        data = JSON.parse(rawText);
+      } catch (parseErr) {
+        traceEntry.error = `JSON parse failed: ${parseErr.message}`;
+        traceEntry.response_preview = rawText.slice(0, 2000);
+        addTrace(traceEntry);
+        throw new Error(`Invalid JSON from API: ${rawText.slice(0, 200)}`);
+      }
+
+      traceEntry.companies_found = data.companies?.length || 0;
+      traceEntry.raw_result_count = data.rawResultCount || 0;
+      traceEntry.debug = data.debug || null;
+      addTrace(traceEntry);
+
+      return data;
     } catch (e) {
+      traceEntry.error = traceEntry.error || e.message;
+      if (!traceEntry.status) traceEntry.status = "network_error";
+      addTrace(traceEntry);
+
       if (attempt < retries) {
         await sleep(2000 * (attempt + 1));
         continue;
@@ -182,6 +227,57 @@ const TIER_COLORS = {
   C: { bg: "#E3E8EE", text: "#425466" },
 };
 
+function generateDiagnosticReport(logs, prospects) {
+  const errors = diagnosticTraces.filter((t) => t.error);
+  const successes = diagnosticTraces.filter((t) => !t.error);
+  const zeroResults = diagnosticTraces.filter(
+    (t) => !t.error && t.companies_found === 0
+  );
+
+  const report = [
+    "=== MONEYBADGER PROSPECTING ENGINE — DIAGNOSTIC REPORT ===",
+    `Generated: ${new Date().toISOString()}`,
+    `User Agent: ${navigator.userAgent}`,
+    `Page URL: ${window.location.href}`,
+    "",
+    "--- SUMMARY ---",
+    `Total API calls: ${diagnosticTraces.length}`,
+    `Successful: ${successes.length}`,
+    `Errors: ${errors.length}`,
+    `Zero-result responses: ${zeroResults.length}`,
+    `Prospects found: ${prospects.length}`,
+    "",
+    "--- LOG OUTPUT ---",
+    ...logs.map((l) => `[${l.time}] [${l.type}] ${l.msg}`),
+    "",
+    "--- API CALL TRACES ---",
+    ...diagnosticTraces.map((t, i) => {
+      const lines = [
+        `\n[Trace ${i + 1}] ${t.timestamp}`,
+        `  URL: ${t.url}`,
+        `  Query: "${t.query}" | Vertical: ${t.vertical}`,
+        `  Attempt: ${t.attempt}`,
+        `  Status: ${t.status}`,
+        `  Elapsed: ${t.elapsed_ms || "?"}ms`,
+        `  Response length: ${t.response_length || "?"} bytes`,
+        `  Companies found: ${t.companies_found ?? "n/a"}`,
+        `  Raw results from DDG: ${t.raw_result_count ?? "n/a"}`,
+      ];
+      if (t.error) lines.push(`  ERROR: ${t.error}`);
+      if (t.debug) lines.push(`  DEBUG: ${JSON.stringify(t.debug)}`);
+      if (t.response_preview) {
+        lines.push(`  Response preview:`);
+        lines.push(`    ${t.response_preview.slice(0, 500).replace(/\n/g, "\n    ")}`);
+      }
+      return lines.join("\n");
+    }),
+    "",
+    "=== END REPORT ===",
+  ].join("\n");
+
+  return report;
+}
+
 export default function ProspectingEngine() {
   const [status, setStatus] = useState("idle");
   const [selectedVerticals, setSelectedVerticals] = useState(
@@ -191,6 +287,7 @@ export default function ProspectingEngine() {
   const [logs, setLogs] = useState([]);
   const [progress, setProgress] = useState({ current: 0, total: 0, phase: "" });
   const [expandedId, setExpandedId] = useState(null);
+  const [diagnosticCopied, setDiagnosticCopied] = useState(false);
   const abortRef = useRef(false);
   const logsEndRef = useRef(null);
 
@@ -786,6 +883,48 @@ export default function ProspectingEngine() {
           <div ref={logsEndRef} />
         </div>
 
+        {/* Diagnostic report */}
+        {logs.length > 0 && (
+          <button
+            onClick={async () => {
+              const report = generateDiagnosticReport(logs, prospects);
+              try {
+                await navigator.clipboard.writeText(report);
+                setDiagnosticCopied(true);
+                setTimeout(() => setDiagnosticCopied(false), 3000);
+              } catch {
+                // Fallback for browsers that block clipboard
+                const ta = document.createElement("textarea");
+                ta.value = report;
+                ta.style.position = "fixed";
+                ta.style.opacity = "0";
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand("copy");
+                document.body.removeChild(ta);
+                setDiagnosticCopied(true);
+                setTimeout(() => setDiagnosticCopied(false), 3000);
+              }
+            }}
+            style={{
+              marginTop: 8,
+              padding: "10px 24px",
+              borderRadius: 9999,
+              border: `1px solid ${diagnosticCopied ? "rgba(76,175,80,0.4)" : "rgba(255,255,255,0.12)"}`,
+              background: diagnosticCopied ? "rgba(76,175,80,0.1)" : "transparent",
+              color: diagnosticCopied ? "#4CAF50" : "#8898AA",
+              fontSize: 13,
+              cursor: "pointer",
+              width: "100%",
+              transition: "all 200ms",
+            }}
+          >
+            {diagnosticCopied
+              ? "Diagnostic report copied to clipboard!"
+              : "Copy Diagnostic Report"}
+          </button>
+        )}
+
         {/* Reset */}
         {(status === "done" || status === "stopped") && (
           <button
@@ -794,9 +933,10 @@ export default function ProspectingEngine() {
               setProspects([]);
               setLogs([]);
               setProgress({ current: 0, total: 0, phase: "" });
+              diagnosticTraces.length = 0;
             }}
             style={{
-              marginTop: 12,
+              marginTop: 8,
               padding: "10px 24px",
               borderRadius: 9999,
               border: "1px solid rgba(255,255,255,0.12)",

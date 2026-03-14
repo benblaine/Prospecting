@@ -22,18 +22,33 @@ async function searchDuckDuckGo(query) {
     headers: { "User-Agent": USER_AGENT },
   });
 
-  if (!res.ok) throw new Error(`DuckDuckGo returned ${res.status}`);
-
+  const ddgStatus = res.status;
   const html = await res.text();
+  const htmlLength = html.length;
+
+  if (!res.ok) {
+    throw Object.assign(
+      new Error(`DuckDuckGo returned ${ddgStatus}`),
+      { debug: { ddgStatus, htmlLength, htmlPreview: html.slice(0, 500) } }
+    );
+  }
+
   const $ = load(html);
   const results = [];
+
+  const selectorsChecked = {
+    ".result": $(".result").length,
+    ".web-result": $(".web-result").length,
+    ".result__body": $(".result__body").length,
+    ".links_main": $(".links_main").length,
+    "a.result__a": $("a.result__a").length,
+  };
 
   $(".result").each((_, el) => {
     const title = $(el).find(".result__title a").text().trim();
     const snippet = $(el).find(".result__snippet").text().trim();
     const link = $(el).find(".result__title a").attr("href") || "";
 
-    // DuckDuckGo wraps URLs in a redirect — extract the actual URL
     let href = link;
     const uddgMatch = link.match(/uddg=([^&]+)/);
     if (uddgMatch) {
@@ -45,7 +60,16 @@ async function searchDuckDuckGo(query) {
     }
   });
 
-  return results;
+  return {
+    results,
+    debug: {
+      ddgStatus,
+      htmlLength,
+      selectorsChecked,
+      htmlPreview: html.slice(0, 800),
+      resultCount: results.length,
+    },
+  };
 }
 
 // Extract company-like entities from search results
@@ -172,12 +196,12 @@ app.get("/api/search", async (req, res) => {
   if (!query) return res.status(400).json({ error: "query required" });
 
   try {
-    const results = await searchDuckDuckGo(query);
+    const { results, debug } = await searchDuckDuckGo(query);
     const companies = extractCompanies(results, vertical || "unknown", query);
-    res.json({ companies, rawResultCount: results.length });
+    res.json({ companies, rawResultCount: results.length, debug });
   } catch (e) {
     console.error("Search error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: e.message, debug: e.debug || null });
   }
 });
 
