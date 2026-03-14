@@ -1,4 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { scoreProspect } from "../lib/scoring";
+import { generateEmail } from "../lib/emails";
+
+const API_BASE = "http://localhost:3001";
 
 const VERTICALS = [
   {
@@ -87,166 +91,31 @@ const VERTICALS = [
   },
 ];
 
-const SYSTEM_PROMPT = `You are a B2B sales research analyst for MoneyBadger, a South African crypto payments infrastructure company based in Stellenbosch.
-
-MoneyBadger enables businesses to use crypto rails (Bitcoin, stablecoins like USDT) for:
-
-1. CROSS-BORDER PAYMENTS — faster, cheaper international transfers settled in Rand
-1. CATS (Crypto-Assisted Treasury Service) — stablecoin-based treasury management
-
-You are building a prospecting list of South African businesses that would benefit from these services.
-
-IDEAL CUSTOMER PROFILE:
-
-- Regularly moves money across borders (imports, exports, pays suppliers/contractors abroad)
-- Frustrated by SWIFT fees, slow settlement, FX spreads
-- Monthly cross-border volume > R500k
-- Industries: tourism, import/export, tech/SaaS, e-commerce, agriculture, professional services, NGOs
-- Bonus: already crypto-curious, or have a progressive CFO/founder
-
-RESPOND ONLY IN VALID JSON. No markdown, no backticks, no preamble.`;
-
-const SEARCH_PROMPT = (vertical, query) => `Search the web for: "${query}"
-
-Find real South African companies in the ${vertical} vertical that likely have significant cross-border payment needs.
-
-For each company you find, return this JSON structure:
-{
-  "companies": [
-    {
-      "name": "Company Name",
-      "website": "https://…",
-      "vertical": "${vertical}",
-      "description": "What they do in 1-2 sentences",
-      "cross_border_signals": "Why they likely have cross-border payment pain",
-      "estimated_volume": "low/medium/high based on company size and activity",
-      "decision_maker_hint": "CEO/CFO name if found, or likely title to target",
-      "location": "City, Province",
-      "source": "Where you found this info"
-    }
-  ]
-}
-
-Return 3-8 companies. Only include REAL companies you can verify from search results. Do not fabricate.`;
-
-const SCORE_PROMPT = (company) => `Score this prospect for MoneyBadger's cross-border and treasury services.
-
-Company: ${JSON.stringify(company)}
-
-Score 1-5 on each criterion, then provide an overall weighted score:
-
-- cross_border_volume (weight 3x): How much money likely crosses borders monthly?
-- pain_level (weight 2x): How frustrated are they likely to be with current banking/FX?
-- accessibility (weight 2x): Can we reach the decision-maker? Is this a known company?
-- crypto_readiness (weight 1x): Any signals of crypto awareness or progressive finance?
-- strategic_fit (weight 1x): Does winning them unlock a vertical or referral network?
-
-RESPOND ONLY IN VALID JSON:
-{
-  "scores": {
-    "cross_border_volume": 4,
-    "pain_level": 3,
-    "accessibility": 4,
-    "crypto_readiness": 2,
-    "strategic_fit": 5
-  },
-  "weighted_total": 33,
-  "tier": "A",
-  "reasoning": "One sentence why this score"
-}
-
-Tier bands: 30+ = A, 20-29 = B, 10-19 = C`;
-
-const EMAIL_PROMPT = (company, score) => `Write a short, compelling cold outreach email from Ben at MoneyBadger to the likely decision-maker at ${company.name}.
-
-Company context: ${company.description}. ${company.cross_border_signals}
-Score tier: ${score.tier} (weighted: ${score.weighted_total}/45)
-
-MoneyBadger's value prop for them:
-
-- Crypto rails for cross-border payments, settled in Rand
-- Faster than SWIFT (minutes vs days), cheaper (fraction of bank fees)
-- Stablecoin treasury services for FX optimisation
-- Already integrated with Peach Payments, Ozow, Luno, VALR
-
-Write in a direct, warm, South African tone. No corporate fluff. Keep it under 150 words.
-Reference something specific about THEIR business to show this isn't spam.
-
-RESPOND ONLY IN VALID JSON:
-{
-  "subject": "Email subject line",
-  "body": "Email body text",
-  "cta": "Specific ask / call to action"
-}`;
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function callClaude(apiKey, messages, useSearch = false, retries = 2) {
-  const tools = useSearch
-    ? [{ type: "web_search_20250305", name: "web_search" }]
-    : undefined;
-
+async function searchCompanies(query, vertical, retries = 2) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const body = {
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 4000,
-        system: SYSTEM_PROMPT,
-        messages,
-      };
-      if (tools) body.tools = tools;
-
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify(body),
-      });
+      const params = new URLSearchParams({ query, vertical });
+      const res = await fetch(`${API_BASE}/api/search?${params}`);
 
       if (!res.ok) {
         const err = await res.text();
         if (attempt < retries) {
-          await sleep(3000 * (attempt + 1));
+          await sleep(2000 * (attempt + 1));
           continue;
         }
-        throw new Error(`API ${res.status}: ${err}`);
+        throw new Error(`Search API ${res.status}: ${err}`);
       }
 
-      const data = await res.json();
-      const text = data.content
-        .filter((b) => b.type === "text")
-        .map((b) => b.text)
-        .join("\n");
-
-      return text;
+      return await res.json();
     } catch (e) {
       if (attempt < retries) {
-        await sleep(3000 * (attempt + 1));
+        await sleep(2000 * (attempt + 1));
         continue;
       }
       throw e;
     }
-  }
-}
-
-function parseJSON(text) {
-  try {
-    const cleaned = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(cleaned);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) {
-      try {
-        return JSON.parse(match[0]);
-      } catch {
-        return null;
-      }
-    }
-    return null;
   }
 }
 
@@ -261,7 +130,6 @@ function toCSV(prospects) {
     "Description",
     "Cross-Border Signals",
     "Est. Volume",
-    "Decision Maker",
     "CB Volume Score",
     "Pain Level",
     "Accessibility",
@@ -291,7 +159,6 @@ function toCSV(prospects) {
       p.company.description,
       p.company.cross_border_signals,
       p.company.estimated_volume,
-      p.company.decision_maker_hint,
       p.score?.scores?.cross_border_volume || "",
       p.score?.scores?.pain_level || "",
       p.score?.scores?.accessibility || "",
@@ -316,8 +183,6 @@ const TIER_COLORS = {
 };
 
 export default function ProspectingEngine() {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem("anthropic_api_key") || "");
-  const [apiKeySet, setApiKeySet] = useState(() => !!localStorage.getItem("anthropic_api_key"));
   const [status, setStatus] = useState("idle");
   const [selectedVerticals, setSelectedVerticals] = useState(
     VERTICALS.map((v) => v.id)
@@ -338,13 +203,6 @@ export default function ProspectingEngine() {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  const handleApiKeySubmit = () => {
-    if (apiKey.trim()) {
-      localStorage.setItem("anthropic_api_key", apiKey.trim());
-      setApiKeySet(true);
-    }
-  };
-
   const toggleVertical = (id) => {
     setSelectedVerticals((prev) =>
       prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]
@@ -361,9 +219,9 @@ export default function ProspectingEngine() {
     const totalQueries = verts.reduce((s, v) => s + v.queries.length, 0);
     let queryIdx = 0;
 
-    // Phase 1 — Search
+    // Phase 1 — Search via DuckDuckGo scraping
     log("Starting prospecting engine...", "phase");
-    log(`Searching ${verts.length} verticals, ${totalQueries} queries`, "info");
+    log(`Searching ${verts.length} verticals, ${totalQueries} queries via DuckDuckGo`, "info");
     setProgress({ current: 0, total: totalQueries, phase: "Searching verticals" });
 
     const allCompanies = [];
@@ -384,41 +242,37 @@ export default function ProspectingEngine() {
         log(`Query ${queryIdx}/${totalQueries}: "${query}"`, "search");
 
         try {
-          const result = await callClaude(
-            apiKey,
-            [{ role: "user", content: SEARCH_PROMPT(vertical.name, query) }],
-            true
-          );
-          const parsed = parseJSON(result);
-          if (parsed?.companies) {
-            const newOnes = parsed.companies.filter(
+          const result = await searchCompanies(query, vertical.name);
+          if (result?.companies?.length > 0) {
+            const newOnes = result.companies.filter(
               (c) => !seenNames.has(c.name.toLowerCase())
             );
             newOnes.forEach((c) => seenNames.add(c.name.toLowerCase()));
             allCompanies.push(...newOnes);
             log(
-              `Found ${newOnes.length} new companies (${parsed.companies.length - newOnes.length} dupes skipped)`,
+              `Found ${newOnes.length} new companies (${result.companies.length - newOnes.length} dupes skipped) [${result.rawResultCount} raw results]`,
               "success"
             );
           } else {
-            log("No parseable results from this query", "warn");
+            log(`No companies extracted (${result?.rawResultCount || 0} raw results)`, "warn");
           }
         } catch (e) {
           log(`Error: ${e.message}`, "error");
         }
 
-        await sleep(1500);
+        // Rate-limit DuckDuckGo requests
+        await sleep(2000);
       }
     }
 
     log(`\nTotal unique companies found: ${allCompanies.length}`, "phase");
 
-    // Phase 2 — Score
+    // Phase 2 — Heuristic scoring
     if (abortRef.current) {
       setStatus("stopped");
       return;
     }
-    log("\nScoring prospects against ICP...", "phase");
+    log("\nScoring prospects against ICP (heuristic)...", "phase");
     setProgress({ current: 0, total: allCompanies.length, phase: "Scoring prospects" });
 
     const scored = [];
@@ -430,41 +284,19 @@ export default function ProspectingEngine() {
         total: allCompanies.length,
         phase: `Scoring: ${company.name}`,
       });
-      log(`Scoring ${i + 1}/${allCompanies.length}: ${company.name}`, "info");
 
-      try {
-        const result = await callClaude(apiKey, [
-          { role: "user", content: SCORE_PROMPT(company) },
-        ]);
-        const parsed = parseJSON(result);
-        if (parsed) {
-          scored.push({ company, score: parsed });
-          log(
-            `→ Tier ${parsed.tier} (${parsed.weighted_total}/45) — ${parsed.reasoning || ""}`,
-            parsed.tier === "A" ? "success" : "info"
-          );
-        } else {
-          scored.push({
-            company,
-            score: { tier: "?", weighted_total: 0, scores: {}, reasoning: "Parse error" },
-          });
-          log("→ Could not parse score", "warn");
-        }
-      } catch (e) {
-        log(`Score error: ${e.message}`, "error");
-        scored.push({
-          company,
-          score: { tier: "?", weighted_total: 0, scores: {}, reasoning: "API error" },
-        });
-      }
-
-      await sleep(1000);
+      const score = scoreProspect(company);
+      scored.push({ company, score });
+      log(
+        `${company.name} → Tier ${score.tier} (${score.weighted_total}/45) — ${score.reasoning}`,
+        score.tier === "A" ? "success" : "info"
+      );
     }
 
     // Sort by score
     scored.sort((a, b) => (b.score?.weighted_total || 0) - (a.score?.weighted_total || 0));
 
-    // Phase 3 — Emails for Tier A and top Tier B
+    // Phase 3 — Template emails for Tier A and top Tier B
     if (abortRef.current) {
       setStatus("stopped");
       setProspects(scored);
@@ -489,28 +321,12 @@ export default function ProspectingEngine() {
         total: emailTargets.length,
         phase: `Drafting: ${prospect.company.name}`,
       });
+
+      prospect.email = generateEmail(prospect.company, prospect.score);
       log(
-        `Email ${i + 1}/${emailTargets.length}: ${prospect.company.name}`,
-        "info"
+        `${prospect.company.name} → Subject: "${prospect.email.subject}"`,
+        "success"
       );
-
-      try {
-        const result = await callClaude(apiKey, [
-          {
-            role: "user",
-            content: EMAIL_PROMPT(prospect.company, prospect.score),
-          },
-        ]);
-        const parsed = parseJSON(result);
-        if (parsed) {
-          prospect.email = parsed;
-          log(`→ Subject: "${parsed.subject}"`, "success");
-        }
-      } catch (e) {
-        log(`Email error: ${e.message}`, "error");
-      }
-
-      await sleep(1000);
     }
 
     setProspects(scored);
@@ -576,16 +392,16 @@ export default function ProspectingEngine() {
           Engine
         </div>
         <div style={{ color: "#8898AA", fontSize: 13, marginTop: 4 }}>
-          Cross-border & treasury services pipeline builder — runs on Claude API +
-          web search
+          Cross-border & treasury services pipeline builder — web scraping +
+          heuristic scoring
         </div>
       </div>
 
       {/* Main */}
       <div style={{ padding: "20px 24px", maxWidth: 800, margin: "0 auto" }}>
-        {/* API Key input */}
-        {!apiKeySet && (
-          <div style={{ marginBottom: 24 }}>
+        {/* Vertical selector */}
+        {status === "idle" && (
+          <div>
             <div
               style={{
                 fontSize: 13,
@@ -596,90 +412,7 @@ export default function ProspectingEngine() {
                 marginBottom: 12,
               }}
             >
-              Enter your Anthropic API Key
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleApiKeySubmit()}
-                placeholder="sk-ant-..."
-                style={{
-                  flex: 1,
-                  padding: "12px 16px",
-                  borderRadius: 8,
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  background: "rgba(255,255,255,0.04)",
-                  color: "#FFFFFF",
-                  fontSize: 14,
-                  fontFamily: "'JetBrains Mono', monospace",
-                  outline: "none",
-                }}
-              />
-              <button
-                onClick={handleApiKeySubmit}
-                disabled={!apiKey.trim()}
-                style={{
-                  padding: "12px 24px",
-                  borderRadius: 8,
-                  border: "none",
-                  background: apiKey.trim() ? "#F5A623" : "#425466",
-                  color: "#0A2540",
-                  fontSize: 14,
-                  fontWeight: 700,
-                  cursor: apiKey.trim() ? "pointer" : "not-allowed",
-                }}
-              >
-                Save
-              </button>
-            </div>
-            <div style={{ color: "#8898AA", fontSize: 11, marginTop: 6 }}>
-              Stored locally in your browser. Never sent anywhere except the Anthropic API.
-            </div>
-          </div>
-        )}
-
-        {/* Vertical selector */}
-        {apiKeySet && status === "idle" && (
-          <div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: 12,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 13,
-                  fontWeight: 600,
-                  color: "#8898AA",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.08em",
-                }}
-              >
-                Select verticals to prospect
-              </div>
-              <button
-                onClick={() => {
-                  localStorage.removeItem("anthropic_api_key");
-                  setApiKey("");
-                  setApiKeySet(false);
-                }}
-                style={{
-                  padding: "4px 12px",
-                  borderRadius: 9999,
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  background: "transparent",
-                  color: "#8898AA",
-                  fontSize: 11,
-                  cursor: "pointer",
-                }}
-              >
-                Change API Key
-              </button>
+              Select verticals to prospect
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {VERTICALS.map((v) => {
@@ -739,8 +472,8 @@ export default function ProspectingEngine() {
                 textAlign: "center",
               }}
             >
-              Takes ~10-20 min depending on verticals selected. Safe to lock your
-              phone.
+              Takes ~2-5 min depending on verticals selected. Requires the
+              backend server running on port 3001.
             </div>
           </div>
         )}
@@ -944,11 +677,6 @@ export default function ProspectingEngine() {
                         {p.company.website && (
                           <p style={{ color: "#8898AA", margin: "0 0 4px", fontSize: 12 }}>
                             {p.company.website}
-                          </p>
-                        )}
-                        {p.company.decision_maker_hint && (
-                          <p style={{ color: "#8898AA", margin: "0 0 4px", fontSize: 12 }}>
-                            Contact: {p.company.decision_maker_hint}
                           </p>
                         )}
                         <p style={{ color: "#8898AA", margin: "4px 0 0", fontSize: 11 }}>
